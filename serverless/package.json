@@ -1,0 +1,8 @@
+{
+  "name": "cryptobot-control-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {"deploy": "tgcloud push", "check": "node --check tgcloud/lib/forward.js"},
+  "devDependencies": {"@tgcloud/cli": "0.2.0"}
+}
+
