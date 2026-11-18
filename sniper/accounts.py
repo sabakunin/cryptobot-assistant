@@ -12,6 +12,7 @@ PROFILE_KEYS = (
     "offers",
     "notified",
     "ignored",
+    "closed_deals",
     "audit",
     "stats",
     "last_seen",

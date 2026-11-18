@@ -7,11 +7,15 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from telethon import errors
 
-from .engine import active_buttons, audit, ingest, notice
+from .engine import active_buttons, audit, chunks, ingest, notice, remember_closed
 from .parser import NUMBER, bot_money, confirmation, deal_reference, deal_status, is_trade_chat_notice
 from .telegram_ui import InterfaceChanged, navigation_retryable
 
 TERMINAL = {"CANCELLED", "COMPLETED", "REJECTED"}
+
+
+class OfferNoLongerEligible(RuntimeError):
+    """A valid offer no longer fits current filters; continue scanning."""
 
 
 def no_active_deals(screen):
@@ -61,14 +65,48 @@ class Execution:
                 )
                 self.wake.set()
                 return
-            screen = await self.ui.open_deal(active["deal_id"])
-            await self.observe(screen)
+            try:
+                screen = await self.ui.open_deal(active["deal_id"])
+                await self.observe(screen)
+            except InterfaceChanged:
+                pass
+            latest = (await self.store.read())["active"]
+            if latest and latest["id"] == active["id"]:
+                # Manual cancellation can replace the detail message with a list
+                # or omit #D. Only an explicitly empty *active* list releases it.
+                screen = await self.ui.active_deals()
+                if no_active_deals(screen):
+
+                    def release(s):
+                        current = s["active"]
+                        if not current or current["id"] != active["id"]:
+                            return []
+                        remember_closed(s, current.get("deal_id"))
+                        if current.get("offer_id"):
+                            s["ignored"] = list(dict.fromkeys(s["ignored"] + [current["offer_id"]]))[-2000:]
+                        s.update(active=None, account_checked=True)
+                        return [notice("✅ В CryptoBot нет активных сделок. Блокировка снята.")]
+
+                    await self.store.apply(release)
+                else:
+                    await self.store.apply(
+                        lambda s: [
+                            notice(
+                                "В CryptoBot остаются активные сделки или статус не подтверждён.",
+                                active_buttons(latest),
+                            )
+                        ]
+                    )
+            self.wake.set()
             return
         screen = await self.ui.active_deals()
         empty = no_active_deals(screen)
 
         def apply(s):
             s["account_checked"] = empty
+            if empty and s["active"] and not s["active"].get("managed"):
+                remember_closed(s, s["active"].get("deal_id"))
+                s["active"] = None
             if not empty:
                 s["settings"]["running"] = False
             revision = s.pop("reconcile_panel_revision", None)
@@ -157,9 +195,13 @@ class Execution:
                 "message_id": screen.id,
                 "deal_id": None,
                 "time": time.time(),
+                "terms": offer.terms,
+                "multitasking": offer.multitasking,
             }
             audit(s, "preparing", offer_id=offer.id)
-            return messages + [notice("⏳ Проверяю актуальную цену и максимальную сумму перед созданием.")]
+            # Persist the reservation now; publish one useful notification after
+            # submission instead of filling the delivery queue before every buy.
+            return []
 
         await self.store.apply(reserve)
         self.wake.set()
@@ -176,12 +218,13 @@ class Execution:
                 active = s["active"]
                 if not active or active["id"] != transaction_id:
                     raise RuntimeError("Reservation was lost")
-                if (
-                    not s["settings"]["running"]
-                    or s["settings"]["mode"] != "auto"
-                    or price > Decimal(s["settings"]["auto_max"])
-                ):
-                    raise RuntimeError("Stopped or price exceeds current threshold")
+                if not s["settings"]["running"] or s["settings"]["mode"] != "auto":
+                    raise OfferNoLongerEligible("Stopped")
+                if price > Decimal(s["settings"]["auto_max"]):
+                    raise OfferNoLongerEligible("Final price exceeds current threshold")
+                minimum = s["settings"].get("min_order_rub")
+                if minimum and rubles < Decimal(minimum):
+                    raise OfferNoLongerEligible("Final total below minimum")
                 # Persist BEFORE the external side effect. Crash afterwards means UNKNOWN, not a retry.
                 active.update(
                     stage="ATTEMPTING",
@@ -199,6 +242,7 @@ class Execution:
             await self.observe(result, associate=True)
         except Exception as error:
             recoverable = navigation_retryable(error) or isinstance(error, errors.FloodWaitError)
+            filtered = isinstance(error, OfferNoLongerEligible)
 
             def failure(s):
                 active = s["active"]
@@ -209,6 +253,10 @@ class Execution:
                     text = "⚠️ Исход создания сделки неизвестен. Повторять не буду. Проверь CryptoBot и нажми «Проверить статус»."
                 else:
                     s["active"] = None
+                    if filtered:
+                        s["stats"]["filtered"] += 1
+                        audit(s, "confirmation_filtered", offer_id=offer.id)
+                        return []
                     if recoverable:
                         # No Create request was attempted. Re-open and re-validate the
                         # offer on the next scan; a failed preparation is not a purchase.
@@ -221,6 +269,8 @@ class Execution:
                 return [notice(text, active_buttons(active) if attempted else [])]
 
             await self.store.apply(failure)
+            if filtered:
+                return
             raise
         finally:
             self.wake.set()
@@ -234,33 +284,49 @@ class Execution:
 
         def apply(s):
             active = s["active"]
-            if not active or not active.get("managed"):
+            if not active:
                 return []
             if associate:
                 # Only the immediate response to our one submitted operation can establish this association.
                 active.update(deal_id=ref, message_id=screen.id)
-            elif not ref or ref != active.get("deal_id"):
-                return []
-            if ref is None:
+            elif ref != active.get("deal_id") or not ref:
+                if not (
+                    ref is None
+                    and status in TERMINAL
+                    and screen.id == active.get("message_id")
+                    and active.get("deal_id")
+                ):
+                    return []
+            linked_ref = ref or active.get("deal_id")
+            if linked_ref is None:
                 status_value = "UNKNOWN"
             else:
                 status_value = status
             previous = active.get("stage")
             if not associate and status_value == "UNKNOWN":
                 return []
+            # Poll the newest confirmed message, including when its status did not change.
+            active["message_id"] = screen.id
             if status_value == previous:
                 return []
             active["stage"] = status_value
             audit(s, "deal_status", status=status_value, deal_id=ref)
             if status_value in TERMINAL:
+                remember_closed(s, linked_ref)
                 if active.get("offer_id"):
                     s["ignored"] = list(dict.fromkeys(s["ignored"] + [active["offer_id"]]))[-2000:]
                 s["active"] = None
                 s["account_checked"] = True
                 return [
                     notice(
-                        f"Сделка #{ref}: {status_value}. "
-                        "Объявление исключено из повторного подбора. Поиск может продолжаться."
+                        f"✅ Сделка #{linked_ref}: "
+                        + {"CANCELLED": "отменена", "REJECTED": "отклонена", "COMPLETED": "завершена"}[
+                            status_value
+                        ]
+                        + (
+                            ". Автохав продолжает поиск." if s["settings"]["running"] else ". Поиск на паузе."
+                        ),
+                        [[{"text": "Открыть управление", "callback_data": "menu"}]],
                     )
                 ]
             labels = {
@@ -269,14 +335,20 @@ class Execution:
                 "PAID": "Отмечена отправка оплаты",
                 "UNKNOWN": "Статус не распознан — повторное создание заблокировано",
             }
+            terms = ""
+            if associate and active.get("terms"):
+                terms = "\n\nУсловия продавца:\n" + active["terms"]
+                if active.get("multitasking"):
+                    terms = "\n⚠️ В условиях есть многозадачность." + terms
+            text = (
+                f"{labels.get(status_value, status_value)}\n"
+                f"Сделка: #{ref or 'ID не получен'}\n"
+                f"Сумма: {active.get('rubles', '—')} RUB / {active.get('volume', '—')} USDT\n"
+                "Поиск приостановлен, пока сделка открыта." + terms
+            )
             return [
-                notice(
-                    f"{labels.get(status_value, status_value)}\n"
-                    f"Сделка: #{ref or 'ID не получен'}\n"
-                    f"Сумма: {active.get('rubles', '—')} RUB / {active.get('volume', '—')} USDT\n"
-                    "Поиск приостановлен, пока сделка открыта.",
-                    active_buttons(active),
-                )
+                notice(part, active_buttons(active) if index == 0 else [])
+                for index, part in enumerate(chunks(text))
             ]
 
         await self.store.apply(apply)
@@ -327,8 +399,11 @@ class Execution:
             # A terminal response without an ID is not enough to release the one-trade lock.
             await self.observe(result)
             latest = (await self.store.read())["active"]
-            if latest and latest["id"] == active_id and latest["stage"] == "CANCELLING":
-                raise InterfaceChanged("Cancellation not confirmed")
+            if latest and latest["id"] == active_id:
+                await self.reconcile()
+                latest = (await self.store.read())["active"]
+                if latest and latest["id"] == active_id:
+                    raise InterfaceChanged("Cancellation not confirmed")
         except Exception:
 
             def unknown(s):

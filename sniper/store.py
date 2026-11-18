@@ -49,17 +49,19 @@ class Lease(Base):
 def initial_state():
     return {
         "settings": {
-            "mode": "notify",
+            "mode": "auto",
             "running": False,
             "notify_min": None,
             "notify_max": None,
             "auto_max": None,
+            "min_order_rub": None,
         },
         "pending": None,
         "active": None,
         "offers": {},
         "notified": {},
         "ignored": [],
+        "closed_deals": {},
         "reconcile_requested": False,
         "account_checked": False,
         "audit": [],
@@ -198,7 +200,10 @@ class Store:
                 await session.scalars(
                     select(Outbox)
                     .where(Outbox.sent == 0, Outbox.due <= time.time())
-                    .order_by(case((Outbox.id == "control-panel", 0), else_=1), Outbox.due)
+                    .order_by(
+                        case(((Outbox.id == "control-panel") | Outbox.id.like("panel:%"), 0), else_=1),
+                        Outbox.due,
+                    )
                     .limit(50)
                 )
             ).all()

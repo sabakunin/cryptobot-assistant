@@ -2,7 +2,7 @@ import time
 import uuid
 
 from .accounts import AccountMissing, remove_account, select_account
-from .engine import CAPABILITY_TEXT, active_buttons, audit, button, configured, ingest, notice
+from .engine import CAPABILITY_TEXT, active_buttons, audit, button, configured, notice
 from .parser import ParseError, money, parse_offer
 from .security import safe_link
 
@@ -40,21 +40,17 @@ def accounts_menu(state, runtime):
 def menu(state, runtime=None):
     s = state["settings"]
     ready = configured(s)
-    mode = "Автопокупка" if s["mode"] == "auto" else "Уведомления"
     status = (
         "⏸ Открыта сделка"
         if state["active"]
         else (
             "🟢 Поиск включён"
             if s["running"]
-            else ("⏸ Поиск на паузе" if ready else "⚙️ Для запуска укажи курс этого режима")
+            else ("⏸ Поиск на паузе" if ready else "⚙️ Для запуска укажи курс")
         )
     )
-    rate = (
-        (f"До {s['auto_max']} ₽ / USDT" if s["auto_max"] else "не задан")
-        if s["mode"] == "auto"
-        else f"{s['notify_min'] or '—'} — {s['notify_max'] or '—'} ₽ / USDT"
-    )
+    rate = f"≤ {s['auto_max']} ₽ / USDT" if s["auto_max"] else "не задан"
+    minimum = f"от {s['min_order_rub']} ₽" if s.get("min_order_rub") else "без минимума"
     listener = (runtime or {}).get("listener", "off")
     connection = {
         "userbot": "подключён",
@@ -66,33 +62,35 @@ def menu(state, runtime=None):
         "authorization_required": "нужен вход",
     }.get(listener, listener)
     text = (
-        f"CryptoBot Assistant\nUSDT / RUB · СБП\n\n{status}\n"
-        f"Режим: {mode}\nКурс: {rate}\n\nCryptoBot: {connection}\n"
+        f"CryptoBot Assistant · Автохав\nUSDT / RUB · СБП\n\n{status}\n"
+        f"Курс: {rate}\nСумма покупки: {minimum}\n\nCryptoBot: {connection}\n"
         "Первая страница · одна активная сделка на аккаунт"
     )
     account = state.get("accounts", {}).get(state.get("selected_account"))
     if account:
         text += f"\nАккаунт: {account['label']}"
-    if s["running"]:
+    if state["active"]:
+        primary = button("📦 Открыть активную сделку", callback="deal")
+    elif s["running"]:
         primary = button("⏸ Приостановить поиск", callback="stop")
     elif not ready and not state["active"]:
         primary = button(
-            "✏️ Задать максимальный курс" if s["mode"] == "auto" else "✏️ Задать диапазон курса",
-            callback="set:auto_max" if s["mode"] == "auto" else "set:notify_range",
+            "✏️ Задать максимальный курс",
+            callback="set:auto_max",
         )
     else:
         primary = button("▶️ Запустить поиск", callback="run")
     rows = [
         [primary],
         [
-            button(("✓ " if s["mode"] == "notify" else "") + "🔔 Уведомления", callback="mode:notify"),
-            button(("✓ " if s["mode"] == "auto" else "") + "🎯 Автопокупка", callback="mode:auto"),
+            button("Курс: " + (s["auto_max"] or "задать"), callback="set:auto_max"),
+            button("Мин. сумма: " + (s.get("min_order_rub") or "нет"), callback="set:min_order_rub"),
         ],
-        [button("⚙️ Настроить курс", callback="rates"), button("📦 Сделка", callback="deal")],
-        [button("📊 Статистика", callback="stats"), button("📋 История", callback="history")],
+        [button("📦 Сделка", callback="deal"), button("👥 Аккаунты", callback="accounts")],
         [button("↻ Обновить", callback="menu"), button("Как пользоваться", callback="help")],
-        [button("👥 Аккаунты", callback="accounts")],
     ]
+    if state["active"] and s["running"]:
+        rows.append([button("⏸ Остановить дальнейший поиск", callback="stop")])
     if (runtime or {}).get("is_admin"):
         rows.append([button("🔐 Доступ пользователей", callback="access:list:0")])
     return notice(text, rows)
@@ -100,18 +98,17 @@ def menu(state, runtime=None):
 
 def rates(state):
     s = state["settings"]
-    if s["mode"] == "auto":
-        text = f"🎯 Курс автопокупки\n\nНе выше {s['auto_max'] or '—'} ₽ / USDT.\nСумма — максимальная доступная в объявлении."
-        rows = [[button("Изменить максимальный курс", callback="set:auto_max")]]
-    else:
-        text = f"🔔 Курс уведомлений\n\nОт {s['notify_min'] or '—'} до {s['notify_max'] or '—'} ₽ / USDT включительно.\nТы получишь объявление и условия продавца."
-        rows = [
-            [button("Изменить диапазон целиком", callback="set:notify_range")],
-            [
-                button("От: " + (s["notify_min"] or "—"), callback="set:notify_min"),
-                button("До: " + (s["notify_max"] or "—"), callback="set:notify_max"),
-            ],
+    text = (
+        f"⚙️ Настройки Автохава\n\nКурс ≤ {s['auto_max'] or '—'} ₽ / USDT.\n"
+        f"Минимальная сумма покупки: {s.get('min_order_rub') or 'не задана'} ₽.\n"
+        "Покупается весь доступный максимум. Минимум необязателен и проверяется перед созданием сделки."
+    )
+    rows = [
+        [
+            button("Изменить курс", callback="set:auto_max"),
+            button("Минимальная сумма", callback="set:min_order_rub"),
         ]
+    ]
     if configured(s) and not s["running"] and not state["active"]:
         text += "\n\nКурс сохранён. Теперь можно запустить поиск."
         rows.insert(0, [button("▶️ Запустить поиск", callback="run")])
@@ -171,7 +168,19 @@ def panel_response(state, message, *, home=False):
         ]
         for row in rows
     ]
-    return {**message, "buttons": buttons, "kind": "panel", "_open": state.get("panel_open_epoch")}
+    return {
+        **message,
+        "buttons": buttons,
+        "kind": "panel",
+        "_open": state.get("panel_open_epoch"),
+        "_revision": revision,
+    }
+
+
+def confirmation_action(action):
+    if action.startswith("acct:"):
+        action = action.split(":", 2)[-1]
+    return action.startswith(("armed:", "cancelok:", "resolved:", "closed:", "account:delete:", "access:"))
 
 
 def callback_hint(state, callback):
@@ -180,12 +189,8 @@ def callback_hint(state, callback):
         parts = data.split(":", 2)
         if len(parts) == 3:
             _, revision, action = parts
-            if (
-                revision != str(state.get("ui_revision", 0))
-                and action != "stop"
-                and not action.endswith(":stop")
-            ):
-                return "Это старое меню. Отправь /start — новое появится внизу чата."
+            if revision != str(state.get("ui_revision", 0)) and confirmation_action(action):
+                return "Состояние изменилось. Открываю актуальное управление."
     return None
 
 
@@ -232,12 +237,16 @@ def handle(state, update, runtime):
             if len(parts) != 3:
                 return []
             _, revision, action = parts
+            plain_action = action.split(":", 2)[-1] if action.startswith("acct:") else action
             if (
                 revision != str(state.get("ui_revision", 0))
-                and action != "stop"
-                and not action.endswith(":stop")
+                and plain_action == "run"
+                and state.get("arm")
+                and state["arm"]["expires"] > time.time()
             ):
                 return []
+            if revision != str(state.get("ui_revision", 0)) and confirmation_action(action):
+                return [panel_response(state, menu(state, runtime), home=True)]
             message_id = callback.get("message", {}).get("message_id")
             binding = state.get("control_panel", {})
             if message_id and (not binding.get("message_id") or binding.get("send_attempt")):
@@ -272,9 +281,8 @@ def handle(state, update, runtime):
         if time.time() - state.get("panel_open_at", 0) >= 5:
             state["panel_open_epoch"] = uuid.uuid4().hex
             state["panel_open_at"] = time.time()
-    control = bool(callback or state.get("pending") or (message.get("text") or "").startswith("/"))
     result = _handle(state, update, runtime)
-    if result and control:
+    if result:
         panel = panel_response(state, result[0], home=result[0]["text"].startswith("CryptoBot Assistant"))
         resume_command = (message.get("text") or "").split("@", 1)[0] == "/resume"
         if state["reconcile_requested"] and ((callback and action in {"run", "reconcile"}) or resume_command):
@@ -294,6 +302,7 @@ def _handle(state, update, runtime):
         state["pending"] = None
         commands = {
             "/start": "menu",
+            "/menu": "menu",
             "/settings": "rates",
             "/status": "stats",
             "/stop": "stop",
@@ -334,7 +343,7 @@ def _handle(state, update, runtime):
             # No source text, counterparty, URLs, auth data, account/user ids or session strings.
             return [
                 notice(
-                    f"Диагностика {uuid.uuid4().hex[:8]}\nВерсия: 0.3.3\n"
+                    f"Диагностика {uuid.uuid4().hex[:8]}\nВерсия: 0.4.0\n"
                     f"Источник: {runtime.get('listener', 'off')}\n"
                     f"Режим: {state['settings']['mode']}\n"
                     f"Работает: {state['settings']['running']}\n"
@@ -350,44 +359,26 @@ def _handle(state, update, runtime):
         try:
             field = pending["field"]
             s = state["settings"]
-            if field == "notify_range":
-                import re
-
-                parts = re.split(r"\s*[;–—]\s*|\s+", text.strip())
-                if len(parts) != 2:
-                    raise ParseError("Пришли два курса через пробел, например 89.5 90.2")
-                low, high = map(money, parts)
-                if low > high:
-                    raise ParseError("Нижняя граница не может быть выше верхней")
-                s.update(notify_min=str(low), notify_max=str(high))
+            if field not in {"auto_max", "min_order_rub"}:
+                state["pending"] = None
+                return [rates(state)]
+            if field == "min_order_rub" and text in {"0", "0.0", "0,0"}:
+                s[field] = None
+                state["notified"].clear()
                 state["pending"] = None
                 audit(state, "setting_changed", field=field)
                 return [rates(state)]
             value = money(text)
-            low = value if field == "notify_min" else (money(s["notify_min"]) if s["notify_min"] else None)
-            high = value if field == "notify_max" else (money(s["notify_max"]) if s["notify_max"] else None)
-            if field != "auto_max" and low is not None and high is not None and low > high:
-                raise ParseError("Нижняя граница не может быть выше верхней")
             s[field] = str(value)
+            state["notified"].clear()
             state["pending"] = None
             audit(state, "setting_changed", field=field)
             return [rates(state)]
         except ParseError as error:
-            return [notice(str(error) + ". Введи значение ещё раз или /start.")]
-    try:
-        offer = from_message(message)
-    except ParseError as error:
-        state["stats"]["parse_errors"] += 1
-        return [notice(str(error) + ". /help — инструкция.")]
-    messages = ingest(state, offer)
-    if not messages:
-        reason = (
-            "на паузе"
-            if not state["settings"]["running"] or state["active"]
-            else "не прошла фильтр или уже обработана"
-        )
-        messages = [notice(f"Карточка #{offer.id} прочитана; {reason}.")]
-    return messages
+            return [
+                notice(str(error) + ". Введи значение ещё раз.", [[button("Отмена ввода", callback="menu")]])
+            ]
+    return [menu(state, runtime)]
 
 
 def handle_action(state, action, runtime):
@@ -442,42 +433,33 @@ def handle_action(state, action, runtime):
     # Callbacks and pending inputs are durable; stale buttons cannot close a different deal.
     if action.startswith("set:"):
         field = action.removeprefix("set:")
-        if field not in {"notify_min", "notify_max", "auto_max", "notify_range"}:
-            return []
+        if field not in {"auto_max", "min_order_rub"}:
+            return [rates(state)]
         state["pending"] = {"field": field, "expires": time.time() + 600}
         prompt = (
-            "Пришли нижний и верхний курс через пробел.\nНапример: 89.5 90.2"
-            if field == "notify_range"
-            else "Пришли курс в ₽ за 1 USDT.\nНапример: 89.87"
+            "Пришли максимальный курс покупки в ₽ за 1 USDT.\nНапример: 89.87"
+            if field == "auto_max"
+            else "Пришли минимальную сумму покупки в рублях.\nНапример: 5000\n\n0 — отключить минимум. "
+            "Если доступный максимум меньше этой суммы, объявление будет пропущено."
         )
-        if field == "auto_max":
-            prompt = (
-                "Пришли максимальный курс покупки в ₽ за 1 USDT.\nНапример: 89.87\n\n"
-                "Это отдельная настройка автопокупки. После ввода появится кнопка запуска."
-            )
-        return [notice("✏️ Настройка курса\n\n" + prompt, [[button("Отмена ввода", callback="rates")]])]
+        rows = [[button("Отмена ввода", callback="menu")]]
+        if field == "min_order_rub":
+            rows.insert(0, [button("Без минимума", callback="minimum:off")])
+        return [notice("✏️ Настройка Автохава\n\n" + prompt, rows)]
     state["pending"] = None
+    if action == "minimum:off":
+        s["min_order_rub"] = None
+        state["notified"].clear()
+        audit(state, "setting_changed", field="min_order_rub")
+        return [rates(state)]
     if action.startswith("mode:"):
-        mode = action.removeprefix("mode:")
-        if mode == "paper":
-            return [notice("Эта кнопка устарела. /start — два режима: уведомления и автопокупка.")]
-        if mode not in {"notify", "auto"}:
-            return []
-        if mode == "auto" and not runtime.get("live_enabled"):
-            return [notice(CAPABILITY_TEXT)]
-        if state["active"]:
-            return [
-                notice(
-                    "Сначала закрой активную отметку сделки или симуляцию.", active_buttons(state["active"])
-                )
-            ]
-        if s["mode"] != mode:
-            s["mode"], s["running"] = mode, False
+        if s["mode"] != "auto":
+            s.update(mode="auto", running=False)
             state["arm"] = None
             state["arm_after_reconcile"] = False
-            audit(state, "mode_changed", mode=mode)
-        if mode == "auto" and not configured(s):
+        if not configured(s):
             return handle_action(state, "set:auto_max", runtime)
+        return [menu(state, runtime)]
     elif action == "run":
         if s["running"]:
             return [menu(state, runtime)]
@@ -503,11 +485,15 @@ def handle_action(state, action, runtime):
                         "Проверяю активные сделки в CryptoBot…\nПосле проверки здесь появится подтверждение запуска."
                     )
                 ]
-            nonce = uuid.uuid4().hex[:12]
-            state["arm"] = {"nonce": nonce, "expires": time.time() + 600}
+            arm = state.get("arm")
+            if not arm or arm["expires"] < time.time():
+                arm = {"nonce": uuid.uuid4().hex[:12], "expires": time.time() + 600}
+                state["arm"] = arm
+            nonce = arm["nonce"]
             return [
                 notice(
                     f"Включить РЕАЛЬНОЕ создание сделок по курсу ≤ {s['auto_max']} ₽/USDT?\n"
+                    f"Минимальная сумма: {s.get('min_order_rub') or 'не задана'} ₽.\n"
                     "Сумма — весь доступный максимум. Одновременно одна сделка. "
                     "Условия продавца не блокируют покупку; ты получишь их в уведомлении.",
                     [
@@ -534,9 +520,11 @@ def handle_action(state, action, runtime):
     elif action == "help":
         return [
             notice(
-                "Как пользоваться\n\n1. Выбери уведомления или автопокупку.\n"
-                "2. Открой «Настроить курс». Настройки режимов сохраняются отдельно.\n"
-                "3. Нажми «Запустить поиск». Для автопокупки потребуется подтверждение.\n\n"
+                "Как пользоваться\n\n1. Задай максимальный курс.\n"
+                "2. При желании задай минимальную сумму покупки в рублях.\n"
+                "3. Запусти Автохав и подтверди создание сделок.\n\n"
+                "После подтверждённой отмены поиск продолжится автоматически.\n"
+                "Меню и кнопки доступны без повторного /start.\n"
                 "«Сделка» показывает текущий статус и доступные действия.\n"
                 "«Приостановить поиск» останавливает новые попытки; открытая сделка сохраняется.\n\n"
                 "Для связи и диагностики: /inspect и /diagnostics."

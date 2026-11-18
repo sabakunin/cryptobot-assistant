@@ -88,7 +88,7 @@ class LoginManager:
             connection_retries=1,
             flood_sleep_threshold=0,
             device_model="CryptoBot Assistant",
-            app_version="0.3.3",
+            app_version="0.4.0",
         )
 
     async def start(self):

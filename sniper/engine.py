@@ -7,7 +7,7 @@ from .store import audit
 
 CAPABILITY_TEXT = (
     "Источник — первая страница USDT / RUB / СБП в CryptoBot. "
-    "Уведомления отправляют курс и условия; автопокупка выбирает максимальную сумму "
+    "Автохав выбирает максимальную доступную сумму "
     "и создаёт сделку по заданному порогу. Для автопокупки нужны MONITOR_SOURCE=userbot, "
     "LIVE_TRADING_ENABLED=true и отдельное включение кнопкой владельца. "
     "При активной или неопределённой сделке новые покупки приостанавливаются. "
@@ -41,6 +41,12 @@ def eligible(offer: Offer, settings):
     if offer.payment.casefold().strip() != "сбп":
         return False
     price = Decimal(offer.price)
+    minimum = settings.get("min_order_rub")
+    # Rounded availability is only an estimate. Enforce the exact minimum again
+    # against the RUB total on the final confirmation screen.
+    if minimum and offer.amount_source == "кнопка покупки":
+        if price * Decimal(offer.volume) < Decimal(minimum) - Decimal("0.5"):
+            return False
     if settings["mode"] in {"paper", "auto"}:
         return settings["auto_max"] is not None and price <= Decimal(settings["auto_max"])
     low, high = settings["notify_min"], settings["notify_max"]
@@ -112,8 +118,19 @@ def ingest(state, offer: Offer):
     return [notice(part, rows if index == len(parts) - 1 else []) for index, part in enumerate(parts)]
 
 
+def remember_closed(state, deal_id):
+    if deal_id:
+        closed = state.setdefault("closed_deals", {})
+        closed.pop(deal_id, None)
+        closed[deal_id] = time.time()
+        while len(closed) > 1000:
+            closed.pop(next(iter(closed)))
+
+
 def observe_deal(state, deal_id):
     """Conservative pause. A message containing #D is not evidence of acceptance/completion."""
+    if deal_id in state.get("closed_deals", {}):
+        return []
     if state["active"] and state["active"].get("deal_id") == deal_id:
         return []
     if state["active"] and not state["active"].get("paper"):

@@ -42,7 +42,7 @@ def test_reject_wrong_direction_or_pair(card, before, after):
 
 def test_filter_boundaries_bank_and_dedup(offer):
     state = initial_state()
-    state["settings"].update(running=True, notify_min="89.87", notify_max="89.87")
+    state["settings"].update(mode="notify", running=True, notify_min="89.87", notify_max="89.87")
     assert ingest(state, offer)
     assert ingest(state, offer) == []
     assert not eligible(replace(offer, payment="Т-Банк"), state["settings"])
@@ -52,7 +52,7 @@ def test_filter_boundaries_bank_and_dedup(offer):
 
 def test_notifications_ignore_volume_only_changes_and_include_terms(offer):
     state = initial_state()
-    state["settings"].update(running=True, notify_min="80", notify_max="90")
+    state["settings"].update(mode="notify", running=True, notify_min="80", notify_max="90")
     messages = ingest(state, offer)
     assert len(messages) == 1 and offer.terms in messages[0]["text"]
     assert ingest(state, replace(offer, volume="40")) == []

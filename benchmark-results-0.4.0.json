@@ -1,0 +1,52 @@
+{
+  "kind": "synthetic; no Telegram or hosted runtime",
+  "baseline_commit": "9cf69a2",
+  "runs": {
+    "before": [
+      {
+        "unchanged_refresh_ms": 521.85,
+        "refresh_history_requests": 5,
+        "control_while_send_delayed_500ms_ms": 527.17
+      },
+      {
+        "unchanged_refresh_ms": 521.54,
+        "refresh_history_requests": 5,
+        "control_while_send_delayed_500ms_ms": 575.68
+      },
+      {
+        "unchanged_refresh_ms": 518.62,
+        "refresh_history_requests": 5,
+        "control_while_send_delayed_500ms_ms": 556.33
+      }
+    ],
+    "after": [
+      {
+        "unchanged_refresh_ms": 17.53,
+        "refresh_history_requests": 0,
+        "control_while_send_delayed_500ms_ms": 52.65
+      },
+      {
+        "unchanged_refresh_ms": 15.28,
+        "refresh_history_requests": 0,
+        "control_while_send_delayed_500ms_ms": 61.04
+      },
+      {
+        "unchanged_refresh_ms": 15.12,
+        "refresh_history_requests": 0,
+        "control_while_send_delayed_500ms_ms": 44.15
+      }
+    ]
+  },
+  "median": {
+    "before": {
+      "unchanged_refresh_ms": 521.54,
+      "refresh_history_requests": 5,
+      "control_while_send_delayed_500ms_ms": 556.33
+    },
+    "after": {
+      "unchanged_refresh_ms": 15.28,
+      "refresh_history_requests": 0,
+      "control_while_send_delayed_500ms_ms": 52.65
+    }
+  }
+}

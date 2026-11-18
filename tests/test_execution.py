@@ -92,8 +92,7 @@ async def test_stop_before_submit_prevents_purchase(store, offer, card):
 
     ui = FakeUI(screens(card), hook=hook)
     executor = await engine(store, ui)
-    with pytest.raises(RuntimeError):
-        await executor.buy(offer, ui.items[0])
+    await executor.buy(offer, ui.items[0])
     assert b"create" not in ui.calls
     assert (await store.read())["active"] is None
 
@@ -106,8 +105,8 @@ async def test_final_price_rechecked(store, offer, card):
     )
     ui = FakeUI(items)
     executor = await engine(store, ui)
-    with pytest.raises(RuntimeError, match="price exceeds"):
-        await executor.buy(offer, items[0])
+    await executor.buy(offer, items[0])
+    assert (await store.read())["settings"]["running"]
     assert b"create" not in ui.calls
 
 

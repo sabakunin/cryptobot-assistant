@@ -34,7 +34,9 @@ async def test_encrypted_state_and_atomic_inbox(store):
 
 
 async def test_concurrent_duplicate_cards_one_notification(store, offer):
-    await store.apply(lambda s: s["settings"].update(running=True, notify_min="80", notify_max="90"))
+    await store.apply(
+        lambda s: s["settings"].update(mode="notify", running=True, notify_min="80", notify_max="90")
+    )
     await asyncio.gather(*(store.apply(lambda s: ingest(s, offer)) for _ in range(20)))
     assert (await store.read())["stats"]["eligible"] == 1
     assert len(await store.outgoing()) == 1  # card and terms together
@@ -48,15 +50,16 @@ async def test_lease_excludes_second_worker(store):
     assert await store.claim("two")
 
 
-def test_fsm_persists_and_validates_range():
+def test_fsm_persists_and_validates_optional_minimum():
     state = initial_state()
-    handle_action(state, "set:notify_min", {})
+    handle_action(state, "set:auto_max", {})
     handle(state, {"message": {"text": "89,5"}}, {})
-    assert state["settings"]["notify_min"] == "89.5"
-    handle_action(state, "set:notify_max", {})
-    messages = handle(state, {"message": {"text": "88"}}, {})
-    assert "граница" in messages[0]["text"]
-    assert state["settings"]["notify_max"] is None
+    assert state["settings"]["auto_max"] == "89.5"
+    handle_action(state, "set:min_order_rub", {})
+    messages = handle(state, {"message": {"text": "-88"}}, {})
+    assert "число" in messages[0]["text"]
+    assert state["settings"]["min_order_rub"] is None
+    assert state["pending"]["field"] == "min_order_rub"
 
 
 def test_stale_close_does_not_clear_new_trade():

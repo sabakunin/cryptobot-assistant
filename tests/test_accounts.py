@@ -33,7 +33,7 @@ async def make_accounts(store):
 async def test_parallel_workers_preserve_settings_and_active_deals(store, offer):
     ids, (one, two) = await make_accounts(store)
     for scoped in (one, two):
-        await scoped.apply(lambda s: s["settings"].update(running=True, notify_min="80", notify_max="90"))
+        await scoped.apply(lambda s: s["settings"].update(mode="notify", running=True, notify_min="80", notify_max="90"))
     await one.apply(lambda s: s.update(active={"id": "first-deal"}))
     await asyncio.gather(one.apply(lambda s: ingest(s, offer)), two.apply(lambda s: ingest(s, offer)))
     assert (await one.read())["active"]["id"] == "first-deal"

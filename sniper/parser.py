@@ -128,6 +128,27 @@ def listed_price(label: str) -> Decimal | None:
     return bot_money(found.group(1)) if found else None
 
 
+def listed_amount_ceiling(label: str) -> Decimal | None:
+    """Conservative upper bound of the rounded RUB range, never an exact total."""
+    tail = re.search(r"(?:₽|RUB|Р)\s*·\s*(.+)$", label, re.I)
+    if not tail:
+        return None
+    parts = re.split(r"\s*[–—-]\s*", tail.group(1).strip())
+    if len(parts) not in {1, 2}:
+        return None
+    ceilings = []
+    for part in parts:
+        match = re.fullmatch(r"([0-9]+(?:[.,][0-9]+)?)\s*([KКMМ]?)", part, re.I)
+        if not match:
+            return None
+        value = Decimal(match.group(1).replace(",", "."))
+        scale = {"K": 1000, "К": 1000, "M": 1000000, "М": 1000000, "": 1}[match.group(2).upper()]
+        # Allow a whole display unit for rounding/truncation; exact confirmation
+        # remains authoritative. Unknown formats are never excluded here.
+        ceilings.append((value + Decimal(1).scaleb(value.as_tuple().exponent)) * scale)
+    return max(ceilings)
+
+
 def confirmation(text: str) -> tuple[Decimal, Decimal, Decimal]:
     amount = re.search(
         r"купить[^\d\n]*(" + NUMBER + r")\s*USDT\s*за[^\d\n]*(" + NUMBER + r")\s*RUB", text, re.I
@@ -142,12 +163,25 @@ def deal_status(text: str) -> str:
     """Conservative Russian UI recognition; ambiguous text never means success."""
     if is_trade_chat_notice(text):
         return "UNKNOWN"
+    # Seller conditions and quoted messages cannot establish a financial status.
+    text = re.split(r"Условия\s+(?:сделки|продавца)\s*:|Сообщение\s+(?:от|продавца)", text, flags=re.I)[0]
     text = text.casefold()
-    if re.search(r"(?:сделка|заявка)(?:\s+#[dд]\d+)?\s+(?:была\s+)?отменена", text):
+    subject = r"(?:^|\n)\W*(?:сделка|заявка)(?:\s+на\s+(?:покупку|продажу))?(?:\s+#[dд]\d+)?\s*(?:[:—–-]\s*)?"
+    if re.search(subject + r"(?:была\s+|успешно\s+)?отменена\b", text) or re.search(
+        r"(?:^|\n)\W*(?:(?:вы|продавец|покупатель)\s+отменил[аи]?\s+(?:сделку|заявку)|"
+        r"статус\s*:\s*отменена)\b",
+        text,
+    ):
         return "CANCELLED"
-    if re.search(r"сделка(?:\s+#[dд]\d+)?\s+(?:успешно\s+)?завершена", text):
+    if re.search(subject + r"(?:успешно\s+)?завершена\b", text) or re.search(
+        r"(?:^|\n)\W*статус\s*:\s*завершена\b", text
+    ):
         return "COMPLETED"
-    if re.search(r"(?:сделка|заявка)(?:\s+#[dд]\d+)?\s+отклонена", text):
+    if re.search(subject + r"(?:была\s+)?отклонена\b", text) or re.search(
+        r"(?:^|\n)\W*(?:(?:вы|продавец|покупатель)\s+отклонил[аи]?\s+(?:сделку|заявку)|"
+        r"статус\s*:\s*отклонена)\b",
+        text,
+    ):
         return "REJECTED"
     if re.search(r"(?:вы\s+(?:отметили|подтвердили)\s+оплату|вы\s+отправили\s+плат[её]ж)", text):
         return "PAID"

@@ -124,7 +124,7 @@ class TelegramUI:
             flood_sleep_threshold=0,
             connection_retries=5,
             retry_delay=2,
-            sequential_updates=True,
+            sequential_updates=False,
         )
         await client.connect()
         if not await client.is_user_authorized():
@@ -187,15 +187,23 @@ class TelegramUI:
             raise InterfaceChanged("Message no longer available")
         return Screen.from_message(message)
 
-    async def wait_changed(self, previous, allow_same=False):
+    async def wait_changed(self, previous, allow_same=False, previous_revision=None):
         # Prefer edits delivered by Telegram; history is only a timeout fallback.
-        deadline = time.monotonic() + (0.5 if allow_same else 5)
+        deadline = time.monotonic() + (0.08 if allow_same else 5)
         while time.monotonic() < deadline:
             self.changed.clear()
             if (
                 self.latest
                 and not is_trade_chat_notice(self.latest.text)
-                and self.latest.fingerprint != previous.fingerprint
+                and (
+                    self.latest.fingerprint != previous.fingerprint
+                    or (
+                        allow_same
+                        and previous_revision is not None
+                        and self.screen_revision > previous_revision
+                        and self.latest.id == previous.id
+                    )
+                )
             ):
                 return self.latest
             try:
@@ -217,6 +225,7 @@ class TelegramUI:
                 raise InterfaceChanged("Screen changed before click")
             self.latest = screen
             self.changed.clear()
+            revision = self.screen_revision
             # NO automatic retries: this method may submit a financial operation.
             answer = await self.client(
                 functions.messages.GetBotCallbackAnswerRequest(
@@ -225,7 +234,7 @@ class TelegramUI:
             )
             if getattr(answer, "alert", False):
                 raise InterfaceChanged("CryptoBot returned an alert; inspect the chat")
-            return await self.wait_changed(screen, allow_same=allow_same)
+            return await self.wait_changed(screen, allow_same=allow_same, previous_revision=revision)
 
     async def pace(self):
         delay = self.last_action + self.action_interval - time.monotonic()
@@ -287,7 +296,7 @@ class TelegramUI:
         return screen  # Unrecognized scope will not be accepted as an empty account.
 
     async def open_deal(self, deal_id):
-        screen = await self.current()
+        screen = await self.current(force=True)
         if re.search(r"#" + re.escape(deal_id) + r"\b", screen.text, re.I):
             return screen
         screen = await self.my_deals()

@@ -45,24 +45,24 @@ def test_double_tap_reuses_confirmation_and_ignores_old_buttons():
     confirm = callback(find_action(confirmation, "armed:" + nonce))
     handle(state, confirm, {"live_enabled": True})
     assert state["settings"]["running"]
-    assert handle(state, confirm, {"live_enabled": True}) == []
+    assert handle(state, confirm, {"live_enabled": True})[0]["text"].startswith("CryptoBot Assistant")
     assert sum(item["action"] == "real_execution_armed" for item in state["audit"]) == 1
 
 
-def test_selected_mode_does_not_pause_running_notifications():
+def test_legacy_mode_button_cannot_restore_removed_mode():
     state = initial_state()
     state["settings"]["running"] = True
-    home = handle(state, {"message": {"text": "/start"}}, {})[0]
-    handle(state, callback(find_action(home, "mode:notify")), {})
+    handle(state, {"message": {"text": "/start"}}, {})
+    handle(state, callback("mode:notify"), {})
     assert state["settings"]["running"]
 
 
-def test_switch_to_unconfigured_auto_prompts_then_offers_start_without_arming():
+def test_unconfigured_auto_prompts_then_offers_start_without_arming():
     state = initial_state()
-    state["settings"].update(running=True, notify_min="89.87", notify_max="90")
+    state["settings"].update(running=False, notify_min="89.87", notify_max="90")
     runtime = {"live_enabled": True}
     home = handle(state, {"message": {"text": "/start"}}, runtime)[0]
-    prompt = handle(state, callback(find_action(home, "mode:auto")), runtime)[0]
+    prompt = handle(state, callback(find_action(home, "set:auto_max")), runtime)[0]
     assert "максимальный курс" in prompt["text"]
     assert state["pending"]["field"] == "auto_max"
     assert state["settings"]["auto_max"] is None
@@ -92,21 +92,22 @@ def test_unconfigured_auto_has_direct_setup_path(entry):
 
 def test_configured_auto_mode_preserves_threshold_and_does_not_start():
     state = initial_state()
-    state["settings"].update(running=True, auto_max="88.5", notify_max="90")
+    state["settings"].update(mode="notify", running=True, auto_max="88.5", notify_max="90")
     view = handle(state, callback("mode:auto"), {"live_enabled": True})[0]
     assert state["settings"]["auto_max"] == "88.5"
     assert not state["settings"]["running"] and state["pending"] is None
     assert find_action(view, "run")
 
 
-def test_range_input_updates_both_bounds_atomically():
+def test_optional_minimum_input_updates_only_minimum():
     state = initial_state()
     state["settings"].update(notify_min="80", notify_max="81")
     view = handle(state, {"message": {"text": "/settings"}}, {})[0]
-    handle(state, callback(find_action(view, "set:notify_range")), {})
-    handle(state, {"message": {"text": "90 91"}}, {})
-    assert state["settings"]["notify_min"] == "90"
-    assert state["settings"]["notify_max"] == "91"
+    handle(state, callback(find_action(view, "set:min_order_rub")), {})
+    handle(state, {"message": {"text": "5 000"}}, {})
+    assert state["settings"]["min_order_rub"] == "5000"
+    assert state["settings"]["notify_min"] == "80"
+    assert state["settings"]["notify_max"] == "81"
     assert state["pending"] is None
 
 
@@ -124,7 +125,7 @@ def test_cancel_confirmation_is_single_use_and_legacy_confirmations_blocked():
     confirm = handle(state, callback(find_action(view, "cancel:trade")), {})[0]
     handle(state, callback(find_action(confirm, "cancelok:trade")), {"live_enabled": True})
     assert state["active"]["cancel_requested"]
-    assert handle(state, callback(find_action(confirm, "cancelok:trade")), {"live_enabled": True}) == []
+    assert handle(state, callback(find_action(confirm, "cancelok:trade")), {"live_enabled": True})
     assert sum(item["action"] == "cancel_requested" for item in state["audit"]) == 1
     state["active"]["cancel_requested"] = False
     handle(state, callback("cancelok:trade"), {"live_enabled": True})
@@ -189,7 +190,7 @@ async def test_unknown_initial_send_is_not_repeated_automatically(store):
     await deliver_panel(store, bot, 42, payload)
     bot.send_message.assert_awaited_once()
     # The delivered panel's callback recovers its ID after the lost response.
-    data = callback(find_action(payload, "rates"), message_id=321)
+    data = callback(find_action(payload, "set:auto_max"), message_id=321)
     await store.apply(lambda state: handle(state, data, {}))
     recovered = (await store.outgoing())[0][2]
     await deliver_panel(store, bot, 42, recovered)
@@ -233,7 +234,7 @@ async def test_start_sends_visible_panel_then_navigation_edits_it(store):
     await deliver_panel(store, bot, 42, first)
     bot.send_message.assert_awaited_once()
     bot.edit_message_text.assert_not_awaited()
-    await store.apply(lambda s: handle(s, callback(find_action(first, "rates"), message_id=322), {}))
+    await store.apply(lambda s: handle(s, callback(find_action(first, "set:auto_max"), message_id=322), {}))
     next_panel = (await store.outgoing())[0][2]
     await deliver_panel(store, bot, 42, next_panel)
     assert bot.edit_message_text.call_args.kwargs["message_id"] == 322
@@ -265,7 +266,7 @@ async def test_uncertain_start_send_is_not_duplicated_by_new_payload_generation(
     payload = (await store.outgoing())[0][2]
     await deliver_panel(store, bot, 42, payload)
     bot.send_message.assert_awaited_once()
-    await store.apply(lambda s: handle(s, callback(find_action(payload, "rates"), message_id=322), {}))
+    await store.apply(lambda s: handle(s, callback(find_action(payload, "set:auto_max"), message_id=322), {}))
     await deliver_panel(store, bot, 42, (await store.outgoing())[0][2])
     assert bot.edit_message_text.call_args.kwargs["message_id"] == 322
     bot.send_message.assert_awaited_once()
@@ -274,7 +275,8 @@ async def test_uncertain_start_send_is_not_duplicated_by_new_payload_generation(
 def test_stale_button_has_visible_hint_but_stop_remains_available():
     state = initial_state()
     state["ui_revision"] = 5
-    assert "/start" in callback_hint(state, {"data": "ui:4:rates"})
+    assert callback_hint(state, {"data": "ui:4:rates"}) is None
+    assert callback_hint(state, {"data": "ui:4:armed:old"})
     assert callback_hint(state, {"data": "ui:5:rates"}) is None
     assert callback_hint(state, {"data": "ui:4:stop"}) is None
     assert callback_hint(state, {"data": "ui:4:acct:example:stop"}) is None

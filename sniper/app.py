@@ -43,7 +43,7 @@ def create_app(config: Config, runtime=None):
 
     @app.get("/")
     async def root():
-        return {"service": "CryptoBot Assistant", "version": "0.3.3", "control": "Telegram bot"}
+        return {"service": "CryptoBot Assistant", "version": "0.4.0", "control": "Telegram bot"}
 
     @app.post("/telegram/update")
     async def telegram_update(request: Request):

@@ -89,6 +89,7 @@ def test_only_identified_first_page_is_eligible_for_immediate_scan(pages, allowe
 async def test_listing_push_wakes_scan_before_refresh_deadline_without_database_read():
     state = initial_state()
     state["settings"].update(running=True)
+    state["account_checked"] = True
     first_scanned = asyncio.Event()
     latest = Screen(1, LISTING, (Key("· 1 ·", b"one"), Key("89 ₽", b"offer")))
     ui = TelegramUI(AsyncMock(), "peer")

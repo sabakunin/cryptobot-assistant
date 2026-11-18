@@ -9,6 +9,8 @@ from aiogram.types import InlineKeyboardMarkup
 
 async def deliver_panel(store, bot, owner, payload):
     state = await store.read()
+    if payload.get("_revision", state.get("ui_revision")) != state.get("ui_revision"):
+        return
     panel = state.get("control_panel", {})
     target = panel.get("message_id")
     delivery = payload["_delivery"]

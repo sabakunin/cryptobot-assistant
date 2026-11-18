@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cryptobot-assistant"
-version = "0.3.3"
+version = "0.4.0"
 description = "CryptoBot P2P user client with live Telegram navigation and owner-controlled execution"
 requires-python = ">=3.12"
 dependencies = [

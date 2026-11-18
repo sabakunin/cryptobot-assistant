@@ -12,13 +12,20 @@ from telethon import errors, events
 
 from .accounts import AccountMissing, AccountStore, import_legacy_session
 from .control import callback_hint
-from .engine import chunks, ingest, notice, observe_deal
+from .engine import chunks, ingest, notice, observe_deal, remember_closed
 from .panel import deliver_panel
-from .parser import OFFER_ID, deal_reference, is_trade_chat_notice, parse_offer
+from .parser import (
+    OFFER_ID,
+    deal_reference,
+    deal_status,
+    is_trade_chat_notice,
+    listed_amount_ceiling,
+    parse_offer,
+)
 from .security import log_error, log_event
 from .store import Store
 from .telegram_ui import InterfaceChanged, Screen, TelegramUI, navigation_retryable
-from .trading import Execution
+from .trading import TERMINAL, Execution
 from .users import UserStore, approved, private_sender, route_update, user_state
 from .web_login import LoginError, LoginManager
 
@@ -46,6 +53,8 @@ class Runtime:
         self.owner = uuid.uuid4().hex
         self.wake, self.monitor_wake, self.stopping = asyncio.Event(), asyncio.Event(), asyncio.Event()
         self.tasks = []
+        self.input_wake = asyncio.Event()
+        self.callback_tasks = set()
         self.ui = None
         self.execution = None
         self.status = {"listener": "off", "live_enabled": config.live_trading_enabled}
@@ -91,10 +100,9 @@ class Runtime:
                 data["arm"] = None
                 data["arm_after_reconcile"] = False
                 data.pop("reconcile_panel_revision", None)
-                if data["settings"]["mode"] == "paper" and not data["active"]:
-                    data["settings"].update(mode="notify", running=False)
-                if data["settings"]["mode"] == "auto":
-                    data["settings"]["running"] = False
+                data["settings"].update(mode="auto", running=False)
+                data["settings"].setdefault("min_order_rub", None)
+                data.setdefault("closed_deals", {})
                 if data["active"] and data["active"].get("stage") in {
                     "ATTEMPTING",
                     "CANCELLING",
@@ -105,7 +113,11 @@ class Runtime:
 
         await self.store.apply(restart)
         self.bot_blocked_until = (await self.store.read()).get("bot_retry_after", 0)
-        self.tasks = [asyncio.create_task(self.heartbeat()), asyncio.create_task(self.delivery())]
+        self.tasks = [
+            asyncio.create_task(self.heartbeat()),
+            asyncio.create_task(self.delivery()),
+            asyncio.create_task(self.control_loop()),
+        ]
         self.tasks.append(asyncio.create_task(self.login.sweep()))
         if self.config.bot_transport == "polling":
             self.tasks.append(asyncio.create_task(self.poll()))
@@ -141,6 +153,9 @@ class Runtime:
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        for task in self.callback_tasks:
+            task.cancel()
+        await asyncio.gather(*self.callback_tasks, return_exceptions=True)
         await asyncio.gather(*(manager.close() for manager in self.logins.values()))
         if self.ui:
             await self.ui.client.disconnect()
@@ -246,14 +261,25 @@ class Runtime:
                 return
         if allowed or not callback:
             await self.store.enqueue(data)
+            self.input_wake.set()
             self.wake.set()
         if callback and time.time() >= self.bot_blocked_until:
-            try:
-                await self.bot.answer_callback_query(callback["id"], text=hint, show_alert=bool(hint))
-            except TelegramRetryAfter as error:
-                await self.defer_bot(error.retry_after)
-            except Exception:
-                pass
+            # An acknowledgement must never hold up polling or the control queue.
+            # Bound concurrency; Telegram's callback lifetime is short anyway.
+            if len(self.callback_tasks) < 32:
+                task = asyncio.create_task(self.answer_callback(callback["id"], hint))
+                self.callback_tasks.add(task)
+                task.add_done_callback(self.callback_tasks.discard)
+
+    async def answer_callback(self, callback_id, hint):
+        try:
+            await asyncio.wait_for(
+                self.bot.answer_callback_query(callback_id, text=hint, show_alert=bool(hint)), timeout=3
+            )
+        except TelegramRetryAfter as error:
+            await self.defer_bot(error.retry_after)
+        except Exception:
+            pass
 
     async def defer_bot(self, seconds):
         self.bot_blocked_until = max(self.bot_blocked_until, time.time() + seconds)
@@ -277,11 +303,10 @@ class Runtime:
                 log_error("poll_failed", error)
                 await asyncio.sleep(5)
 
-    async def delivery(self):
-        last_cleanup = 0
+    async def control_loop(self):
+        """Durable control input is independent of slow/rate-limited notifications."""
         while not self.stopping.is_set():
-            self.wake.clear()
-            retry_delay = 600
+            self.input_wake.clear()
             try:
                 incoming = await self.store.inbox()
                 for update_id, data in incoming:
@@ -309,6 +334,22 @@ class Runtime:
                     self.account_wake.set()
                     for worker in self.workers.values():
                         worker.monitor_wake.set()
+                if incoming:
+                    self.wake.set()
+                if len(incoming) == 50:
+                    self.input_wake.set()
+            except Exception as error:
+                self.errors.inc()
+                log_error("control_queue_failed", error)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.input_wake.wait(), timeout=2)
+
+    async def delivery(self):
+        last_cleanup = 0
+        while not self.stopping.is_set():
+            self.wake.clear()
+            retry_delay = 600
+            try:
                 outgoing = await self.store.outgoing() if time.time() >= self.bot_blocked_until else []
                 for message_id, attempts, payload in outgoing:
                     try:
@@ -348,7 +389,11 @@ class Runtime:
                         delay = min(300, 2 ** min(attempts + 1, 8))
                         await self.store.retry(message_id, attempts, delay, payload.get("_delivery"))
                         retry_delay = min(retry_delay, delay)
-                if len(incoming) == 50 or len(outgoing) == 50:
+                    if self.wake.is_set():
+                        # Re-read the queue so a new control panel jumps ahead of
+                        # the rest of an already-fetched notification batch.
+                        break
+                if len(outgoing) == 50:
                     self.wake.set()
                 if time.time() - last_cleanup > 3600:
                     await self.store.clean()
@@ -481,11 +526,27 @@ class Runtime:
             self.monitor_wake.set()
             return
         state = await self.store.read()
+        ref = deal_reference(screen.text)
+        if ref and deal_status(screen.text) in TERMINAL:
+            if state["active"]:
+                await self.execution.observe(screen)
+            await self.store.apply(lambda s: remember_closed(s, ref))
+            self.monitor_wake.set()
+            self.wake.set()
+            return
         # Financial execution and navigation are serialized in monitor_loop, never event callbacks.
         if state["active"] and state["active"].get("managed"):
             # Do not process an immediate submission result twice before buy() associates it.
             if state["active"].get("deal_id"):
                 await self.execution.observe(screen)
+                if not ref and deal_status(screen.text) in TERMINAL:
+
+                    def check_idless(s):
+                        if s["active"] and s["active"]["id"] == state["active"]["id"]:
+                            s["reconcile_requested"] = True
+
+                    await self.store.apply(check_idless)
+                self.monitor_wake.set()
             return
         if deal_reference(screen.text):
             await self.store.apply(lambda s: observe_deal(s, deal_reference(screen.text)))
@@ -540,13 +601,17 @@ class Runtime:
                     elif (
                         active.get("managed")
                         and active.get("deal_id")
-                        and time.monotonic() - last_active_check > 30
+                        and time.monotonic() - last_active_check > 5
                     ):
                         # Read already-observed trade message; do not navigate while owner pays manually.
                         last_active_check = time.monotonic()
-                        screen = await self.ui.read_message(active["message_id"])
-                        await self.execution.observe(screen)
-                    wait = 15
+                        try:
+                            screen = await self.ui.read_message(active["message_id"])
+                            await self.execution.observe(screen)
+                        except InterfaceChanged:
+                            # CryptoBot may remove/replace the message on manual cancellation.
+                            await self.execution.reconcile()
+                    wait = 5 if (await self.store.read())["active"] else 0.01
                 elif state["settings"]["running"]:
                     if time.monotonic() < recovery_at:
                         # Push updates must not bypass the retry delay.
@@ -570,7 +635,9 @@ class Runtime:
                             if recovery_attempts:
                                 recovery_attempts = 0
                                 recovery_at = 0.0
-                                await self.store.apply(lambda s: [notice("✅ Экран восстановлен. Поиск продолжается.")])
+                                await self.store.apply(
+                                    lambda s: [notice("✅ Экран восстановлен. Поиск продолжается.")]
+                                )
                                 self.wake.set()
                         wait = max(0.01, next_scan_at - time.monotonic())
                 else:
@@ -602,7 +669,11 @@ class Runtime:
                     self.last_listing_fingerprint = None
                     if recovery_attempts == 1:
                         await self.store.apply(
-                            lambda s: [notice("🔄 Экран CryptoBot изменился или ответ задержался. Восстанавливаю поиск.")]
+                            lambda s: [
+                                notice(
+                                    "🔄 Экран CryptoBot изменился или ответ задержался. Восстанавливаю поиск."
+                                )
+                            ]
                         )
                         self.wake.set()
                     # Wait below; never replay the failed callback directly.
@@ -649,12 +720,18 @@ class Runtime:
                 return
             from decimal import Decimal
 
+            minimum = state["settings"].get("min_order_rub")
             candidates = [
                 (key, price)
                 for key, price in listing.listings()
                 if key.data not in seen
                 and price <= Decimal(high)
                 and (state["settings"]["mode"] != "notify" or price >= Decimal(low))
+                and (
+                    not minimum
+                    or (upper := listed_amount_ceiling(key.text)) is None
+                    or upper >= Decimal(minimum)
+                )
             ]
             if not candidates:
                 return
